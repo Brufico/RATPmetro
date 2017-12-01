@@ -1,0 +1,333 @@
+---
+title: "Trafic Ratp 2016"
+author: "Bruno Fischer Colonimos"
+date: "26 novembre 2017"
+output: pdf_document
+# html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+-------------------------------
+
+```{r libs, include=FALSE}
+library(dplyr, quietly = TRUE)
+library(ggplot2)
+```
+
+
+
+
+Importation des données
+=======================
+
+```{r}
+# file parameters
+datadir <- "data"
+fname <- "trafic.csv"
+
+fileurl_csv <- "https://data.ratp.fr/explore/dataset/trafic-annuel-entrant-par-station-du-reseau-ferre-2016/download/?format=csv&timezone=Europe/Berlin&use_labels_for_header=true"
+
+fileurl_xls <- "https://data.ratp.fr/explore/dataset/trafic-annuel-entrant-par-station-du-reseau-ferre-2016/download/?format=xls&timezone=Europe/Berlin&use_labels_for_header=true"
+
+# miust download file ?
+getfile <- FALSE # deja telechargé
+
+# download function
+fdlb <- function(fileUrl, fname, fdir = datadir, verbose = TRUE) {
+        if(!file.exists(fdir)){dir.create(fdir)}
+        fpath <- file.path(".", fdir, fname)
+        download.file(fileUrl, fpath, mode = "w", cacheOK = FALSE) 
+                # for binary files
+        if (verbose) {print(list.files(file.path(".", fdir)))}
+        fpath
+}
+
+# download cvs file
+if (getfile) {
+        fdlb(fileUrl = fileurl_csv, 
+             fname = fname, 
+             fdir = datadir, 
+             verbose = TRUE )
+}
+
+```
+
+```{r read_data}
+tdf <- read.csv2(file = file.path(datadir, fname) )
+
+```
+
+```{r preprocess}
+# ncol(tdf)
+
+# Elimination des 3 dernieres colonnes
+tdf <- tdf[1:11]
+# changer les noms
+names(tdf) <- c("rang", "reseau", "station", "trafic", "c1", "c2", "c3", "c4", "c5", "ville", "arrd")
+# nettoyer la colonne reseau
+tdf$reseau <- substr(tdf$reseau, start = 1, stop = 1)
+tdf$reseau <- ifelse(test = tdf$reseau == "M", "metro", "rer")
+
+# correspondances:
+# convertir les strings vides en NAs
+tona <- function(colname) {
+        charcol <- as.character(tdf[[colname]])
+        tdf[[colname]] <- ifelse(charcol=="", NA, charcol)
+}
+# appliquer aux colonnes de correspondances
+tdf[5:9] <- sapply(names(tdf[5:9]), FUN = tona)
+
+# ajouter une variable "nombre de lignes" == nlig
+tdf$lig <- sapply(seq_along(tdf[[1]]),
+                  FUN = function(i) {
+                          sum(as.integer(!is.na(tdf[i, 5:9])))
+                  }
+)
+
+# ajouter une variable "gare"
+tdf$gare <- grepl("^GARE ", tdf$station )
+# cas de la station "SAINT LAZARE"
+lazare <- grepl("LAZARE", tdf$station)
+# cas de la station "MONTPARNASSE"
+parnasse <- grepl("^MONTPARNASSE", tdf$station)
+# sum(lazare)
+tdf$gare <- tdf$gare | lazare | parnasse
+
+# ajouter une variable "connect" = vrai si la station est connectée à une gare ou station RER
+
+tdf$connect <- tdf$station %in% 
+        c("CHARLES DE GAULLE-ETOILE",
+          "CHATELET",
+          "LES HALLES",
+          "HAVRE-CAUMARTIN",
+          "LA CHAPELLE",
+          "LA DEFENSE",
+          "LES HALLES",
+          "NATION",
+          "OPERA"
+          )
+
+# Synthétiser les types dans une variable
+tdf$type <- ifelse(tdf$reseau == "rer", "Station rer",
+                   ifelse(tdf$gare, "Metro + gare sncf",
+                          ifelse(tdf$connect, 
+                                 " metro avec connexion réseau train-RER",
+                                 "Metro uniquement")))
+
+# réordonner les types  par médiane de trafic
+metrodf <- tdf[tdf$reseau == "metro", ] 
+metrodf$type <- reorder(factor(metrodf$type), metrodf$trafic, FUN = median)
+levels(metrodf$type)
+```
+
+
+
+
+
+
+
+Traitement rapide des trafics par station
+==========================================
+
+```{r}
+ggplot(data = tdf, aes(x=reseau, y = trafic)) + geom_boxplot()
+
+# réordonner les types  par médiane de trafic
+# metrodf$type <- reorder(metrodf$type, metrodf$trafic, FUN = median)
+
+
+# en gardant les stations de métro uniquement
+ggplot(data = metrodf, 
+       aes(x = type, y = trafic, fill = type)) + 
+        geom_violin(varwidth = TRUE, width = 1.5) +
+        geom_boxplot(varwidth = TRUE, width = .5, fill = "white") +
+        scale_x_discrete(limits = rev(levels(metrodf$type))) +
+        coord_flip() + 
+        theme(legend.position = "none")
+
+```
+
+```{r}
+traficstation <- tdf %>%
+        filter(reseau =="metro") %>%
+        select(station,  trafic, type) %>%
+        arrange( desc(trafic))
+
+knitr::kable(traficstation, row.names = TRUE)
+```
+
+```{r}
+# Calcul de médianes par type
+
+meditrafic <- metrodf %>% 
+        group_by(type) %>%
+        summarise(trafic = median(trafic))
+
+meditrafic$lab <- paste0("Mediane = ", 
+                        with(meditrafic, format(trafic / 1000000, digits = 2)),
+                        "M") 
+
+```
+
+
+
+
+```{r}
+bins <- nclass.FD(metrodf$trafic)
+
+ggplot(data = metrodf, aes(x = trafic, fill = type)) + 
+        geom_histogram(bins = bins)
+
+ggplot(data = metrodf, aes(x = trafic, 
+                                 y = ..density..,
+                                 fill = type)) + 
+        geom_histogram(bins = bins) + 
+        geom_vline(data = meditrafic, aes(xintercept = trafic, color = type)) +
+        geom_text(data = meditrafic, 
+                  aes(x=trafic, y = 2.7e-7, label = lab), hjust = -0.05) +
+        facet_grid(type ~ .) +
+        theme(legend.position = "none")
+
+```
+
+
+
+
+
+
+
+
+
+analyse des lignes de métro
+===========================
+
+
+```{r}
+# donnée des lignes
+# -------------------
+
+# definir les lignes
+lignes <- unique(
+        unlist(lapply(tdf[5:9], unique)))
+# trier un peu
+lignes <- sort(x = lignes)
+
+# tester si une ligne passe par une station
+
+stationlignep <- function(i, nomligne) {
+        nomligne %in% tdf[i, 5:9 ]
+}
+
+# stationlignep(1,"B")
+
+# matrice d'appartenance d'une station à une ligne
+# surligne = matrice de booleens stations(matriceligne) x letrolignes(matricecolonnes)
+surligne <- matrix(nrow = nrow(tdf),
+                   ncol = length(lignes))
+colnames(surligne) <- lignes
+
+for(i in 1:nrow(surligne)) {
+        for(nm in lignes) {
+                surligne[i, nm] <- stationlignep(i, nm)
+        }
+}
+
+# surlignebin = conversion en binaires.
+surlignebin <- as.integer(surligne) 
+dim(surlignebin) <- dim(surligne) # remettreles dimensions perdues
+colnames(surlignebin) <- colnames(surligne) # nommer les colonnes par les noms de ligne
+
+head(surlignebin)
+# surlignebin[,"10"]
+
+# nombre de lignes passant par une station
+
+nblignestation <- vapply(1:nrow(surlignebin),
+                         function(i) {sum(surlignebin[i,])},
+                         numeric(1))
+
+        
+# calcul du trafic total ligne par ligne
+traficligne <- sapply(lignes,
+                      function(name) {
+                              sum(surlignebin[,name] * 
+                                          tdf[["trafic"]] /
+                                          nblignestation)
+                      }
+)
+
+```
+
+
+
+liens trafic/trafic lignes
+
+```{r totaltrafic}
+# trafic total des lignes transitant par une station
+tdf$totalstationligne <- sapply(seq_along(tdf[["station"]]),
+                            FUN = function(i) {
+                                    sum(surlignebin[i, ] * traficligne)
+                            }
+)
+
+```
+
+
+
+# scatterplots
+```{r graphs, fig.show="hold", fig.width = 6, fig.asp = .65}
+
+# lien frequentation totale ligne ==> trafic station
+ggplot(data = tdf, aes(totalstationligne, trafic, color = type)) +
+        geom_point() + geom_smooth(method = "lm") + 
+        labs(title = "all")
+
+
+ggplot(data = tdf, aes(totalstationligne, I(log(trafic)),
+                       color=type)) +
+        geom_point() + geom_smooth(method = "lm") + 
+        labs(title = "all + LogY")
+
+
+ggplot(data = tdf, aes(I(log(totalstationligne)), 
+                       I(log(trafic)),
+                       color=type)) +
+        geom_point() + geom_smooth(method = "lm") + 
+        labs(title = "all + logX + logY")
+
+
+# même chose sans les gares
+ggplot(data = tdf[tdf$gare==FALSE,], 
+       aes(totalstationligne, 
+           trafic, 
+           color=type)) +
+        geom_point() + geom_smooth(method = "lm") + 
+        labs(title = "sans gares")
+
+
+
+ggplot(data = tdf[tdf$gare==FALSE,], 
+       aes(totalstationligne, I(log(trafic)),
+           color=type)) +
+        geom_point() + geom_smooth(method = "lm") + 
+        labs(title = "sans gares + logY")
+
+ggplot(data = tdf[tdf$gare==FALSE,], 
+       aes(I(log(totalstationligne)), 
+           I(log(trafic)),
+           color=type)) +
+        geom_point() + geom_smooth(method = "lm") + 
+        labs(title = "sans gares+ logx + logY")
+
+
+```
+
+
+
+
+
+
+
